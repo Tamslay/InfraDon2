@@ -1,212 +1,269 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
-import PouchDB from 'pouchdb'
+import { ref, onMounted } from "vue"
+import PouchDB from "pouchdb"
+import PouchFind from "pouchdb-find"
 
-// ---------------------
-// 🔹 VARIABLES RÉACTIVES
-// ---------------------
-const counter = ref(0)
-const postsData = ref<any[]>([])
-const storage = ref<PouchDB.Database | null>(null)
+// Activation du plugin Find (index + query)
+PouchDB.plugin(PouchFind)
 
-// Champs pour le formulaire
-const newTitle = ref('')
-const newContent = ref('')
+// --- BASES DE DONNÉES ---
+const localDB = ref<any>(null)
+const remoteDB = ref<any>(null)
 
-// ---------------------
-// 🔹 FONCTIONS DE BASE
-// ---------------------
-const increment = () => {
-  counter.value++
+// --- DONNÉES ---
+const posts = ref<any[]>([])
+const searchText = ref("")
+const newTitle = ref("")
+const newContent = ref("")
+const factoryCount = ref(20)
+
+// --- COMMENTAIRES / LIKES ---
+const newComment = ref("")
+const editingContent = ref("")
+const online = ref(true)
+
+// -------------------------------------------------------
+// 🔹 INITIALISATION DES BASES
+// -------------------------------------------------------
+const initDB = () => {
+  localDB.value = new PouchDB("posts-local")
+  remoteDB.value = new PouchDB("http://admin:matteo@localhost:5984/message")
+  console.log("✅ Base locale + distante initialisées")
 }
 
-// Connexion à CouchDB
-const initDatabase = () => {
-  const db = new PouchDB('http://admin:matteo@localhost:5984/message')
-  if (db) {
-    console.log("✅ Connecté à la base 'message'")
-  } else {
-    console.warn("⚠️ Erreur de connexion à la base CouchDB")
+// -------------------------------------------------------
+// 🔹 FETCH
+// -------------------------------------------------------
+const loadPosts = async () => {
+  if (!localDB.value) return
+
+  const result = await localDB.value.allDocs({ include_docs: true })
+  posts.value = result.rows.map(r => r.doc)
+}
+
+// -------------------------------------------------------
+// 🔹 AJOUT DE POST
+// -------------------------------------------------------
+const addPost = async () => {
+  if (!newTitle.value || !newContent.value) return
+
+  const doc = {
+    _id: new Date().toISOString(),
+    title: newTitle.value,
+    content: newContent.value,
+    likes: 0,
+    comments: [],
+    createdAt: new Date().toISOString()
   }
-  storage.value = db
+
+  await localDB.value.put(doc)
+  newTitle.value = ""
+  newContent.value = ""
+  loadPosts()
 }
 
-// Récupérer toutes les données
-const fetchData = () => {
-  const s = storage.value
-  if (s) {
-    s.allDocs({
-      include_docs: true,
-      attachments: true
+// -------------------------------------------------------
+// 🔹 SUPPRIMER
+// -------------------------------------------------------
+const deletePost = async (post: any) => {
+  await localDB.value.remove(post)
+  loadPosts()
+}
+
+// -------------------------------------------------------
+// 🔹 UPDATE
+// -------------------------------------------------------
+const updatePost = async (post: any) => {
+  const updated = { ...post }
+  await localDB.value.put(updated)
+  loadPosts()
+}
+
+// -------------------------------------------------------
+// 🔹 LIKE 👍
+// -------------------------------------------------------
+const likePost = async (post: any) => {
+  post.likes++
+  await localDB.value.put(post)
+  loadPosts()
+}
+
+// -------------------------------------------------------
+// 🔹 AJOUT COMMENTAIRE
+// -------------------------------------------------------
+const addComment = async (post: any) => {
+  if (!newComment.value) return
+
+  post.comments.push({
+    text: newComment.value,
+    date: new Date().toISOString()
+  })
+
+  await localDB.value.put(post)
+  newComment.value = ""
+  loadPosts()
+}
+
+// -------------------------------------------------------
+// 🔹 RECHERCHE VIA INDEX + FIND
+// -------------------------------------------------------
+const createIndex = async () => {
+  await localDB.value.createIndex({
+    index: { fields: ["title"] }
+  })
+  console.log("📌 Index créé sur 'title'")
+}
+
+const searchPosts = async () => {
+  if (!searchText.value) return loadPosts()
+
+  const result = await localDB.value.find({
+    selector: { title: { $regex: searchText.value } }
+  })
+
+  posts.value = result.docs
+}
+
+// -------------------------------------------------------
+// 🔹 FACTORY — Création massive d’objets
+// -------------------------------------------------------
+const generateFakePosts = async () => {
+  const batch = []
+
+  for (let i = 0; i < factoryCount.value; i++) {
+    batch.push({
+      _id: new Date().getTime().toString() + "-" + i,
+      title: "Fake Post " + i,
+      content: "Lorem ipsum " + Math.random(),
+      likes: Math.floor(Math.random() * 50),
+      comments: [],
+      createdAt: new Date().toISOString()
     })
-      .then((result: any) => {
-        console.log('✅ fetchData success =>', result)
-        postsData.value = result.rows
-      })
-      .catch((error: any) => {
-        console.log('❌ fetchData error', error)
-      })
   }
+
+  await localDB.value.bulkDocs(batch)
+  console.log("⚙️  Factory exécutée :", factoryCount.value, "posts")
+  loadPosts()
 }
 
-// ---------------------
-// 🔹 AJOUTER UN DOCUMENT
-// ---------------------
-const addPost = async (postName: string, postContent: string) => {
-  if (!storage.value) return
-  try {
-    const response = await storage.value.post({
-      post_name: postName,
-      post_content: postContent,
-      created_at: new Date().toISOString()
-    })
-    console.log('✅ Document ajouté :', response)
-    newTitle.value = ''
-    newContent.value = ''
-    fetchData()
-  } catch (err) {
-    console.error('❌ Erreur ajout doc:', err)
-  }
-}
-
-// ---------------------
-// 🔹 SUPPRIMER UN DOCUMENT
-// ---------------------
-const deletePost = async (id: string, rev: string) => {
-  if (!storage.value) return
-  try {
-    const response = await storage.value.remove(id, rev)
-    console.log('🗑️ Document supprimé :', response)
-    fetchData()
-  } catch (err) {
-    console.error('❌ Erreur suppression doc:', err)
-  }
-}
-
-// ---------------------
-// 🔹 METTRE À JOUR UN DOCUMENT
-// ---------------------
-const updatePost = async (post: any, newContent: string) => {
-  if (!storage.value) return
-  try {
-    const updatedDoc = { ...post.doc, post_content: newContent }
-    const response = await storage.value.put(updatedDoc)
-    console.log('✏️ Document mis à jour :', response)
-    fetchData()
-  } catch (err) {
-    console.error('❌ Erreur mise à jour doc:', err)
-  }
-}
-
-// ---------------------
-// 🔹 SYNCHRONISATION TEMPS RÉEL
-// ---------------------
-const syncWithRemote = () => {
-  if (!storage.value) return
-  const remote = new PouchDB('http://admin:matteo@localhost:5984/message')
-  storage.value.sync(remote, {
+// -------------------------------------------------------
+// 🔹 SYNCHRO TEMPS RÉEL
+// -------------------------------------------------------
+const startSync = () => {
+  localDB.value.sync(remoteDB.value, {
     live: true,
     retry: true
   })
-    .on('change', info => {
-      console.log('🔄 Changement détecté', info)
-      fetchData()
+    .on("change", info => {
+      console.log("🔄 Sync change :", info)
+      loadPosts()
     })
-    .on('error', err => {
-      console.error('❌ Erreur sync:', err)
-    })
+    .on("paused", () => online.value = false)
+    .on("active", () => online.value = true)
+    .on("error", err => console.error("❌ Sync error :", err))
+
+  console.log("🔁 Synchronisation temps réel activée")
 }
 
-// ---------------------
-// 🔹 AU MONTAGE DU COMPOSANT
-// ---------------------
+// -------------------------------------------------------
+// 🔹 TRACK DES CHANGEMENTS (live reload local)
+// -------------------------------------------------------
+const listenLocalChanges = () => {
+  localDB.value.changes({
+    since: "now",
+    live: true,
+    include_docs: true
+  }).on("change", loadPosts)
+}
+
+// -------------------------------------------------------
+// 🔹 MONTAGE
+// -------------------------------------------------------
 onMounted(() => {
-  initDatabase()
-  fetchData()
-  syncWithRemote()
+  initDB()
+  loadPosts()
+  createIndex()
+  listenLocalChanges()
+  startSync()
 })
 </script>
 
 <template>
   <h1>💬 CouchDB + Vue.js + PouchDB</h1>
 
-  <p>Counter: {{ counter }}</p>
-  <button @click="increment">Increment</button>
+  <p :style="{color: online ? 'green' : 'red'}">
+    ● Statut : <strong>{{ online ? "Online" : "Offline" }}</strong>
+  </p>
 
-  <hr>
-
+  <!-- AJOUT -->
   <h2>➕ Ajouter un post</h2>
   <input v-model="newTitle" placeholder="Titre du post" />
   <input v-model="newContent" placeholder="Contenu du post" />
-  <button @click="addPost(newTitle, newContent)">Ajouter</button>
+  <button @click="addPost">Ajouter</button>
 
   <hr>
 
-  <h2>📚 Liste des posts</h2>
-  <div v-for="post in postsData" :key="post.id" style="border:1px solid #ccc; padding:10px; margin-bottom:10px;">
-    <p><strong>{{ post.doc.post_name }}</strong></p>
-    <p>{{ post.doc.post_content }}</p>
+  <!-- RECHERCHE -->
+  <h2>🔍 Rechercher un post</h2>
+  <input v-model="searchText" placeholder="Recherche titre" />
+  <button @click="searchPosts">Rechercher</button>
 
-    <input
-      v-model="post.doc.post_content"
-      placeholder="Modifier le contenu"
-      style="width: 100%;"
-    />
-    <button @click="updatePost(post, post.doc.post_content)">Mettre à jour</button>
-    <button @click="deletePost(post.id, post.value.rev)">Supprimer</button>
+  <hr>
+
+  <!-- SYNCHRO -->
+  <button @click="startSync">🔄 Synchroniser vers CouchDB</button>
+
+  <hr>
+
+  <!-- FACTORY -->
+  <h2>⚙️ Générer des posts (Factory)</h2>
+  <input v-model="factoryCount" type="number" />
+  <button @click="generateFakePosts">Générer</button>
+
+  <hr>
+
+  <!-- LISTE DES POSTS -->
+  <h2>📚 Liste des posts</h2>
+
+  <div v-for="post in posts" :key="post._id" class="post">
+    <h3>{{ post.title }}</h3>
+    <p>{{ post.content }}</p>
+
+    <input v-model="post.content" />
+    <button @click="updatePost(post)">Mettre à jour</button>
+    <button @click="deletePost(post)">Supprimer</button>
+
+    <p>👍 Likes : {{ post.likes }}</p>
+    <button @click="likePost(post)">💚 Like</button>
+
+    <!-- COMMENTAIRES -->
+    <div class="comments">
+      <h4>💬 Commentaires</h4>
+
+      <ul>
+        <li v-for="c in post.comments">{{ c.text }}</li>
+      </ul>
+
+      <input v-model="newComment" placeholder="Nouveau commentaire" />
+      <button @click="addComment(post)">Ajouter commentaire</button>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.container {
-  padding: 1.5rem;
-  color: white;
-  max-width: 720px;
-  margin: auto;
+.post {
+  border: 1px solid #ccc;
+  padding: 15px;
+  margin-bottom: 15px;
+  border-radius: 8px;
 }
-.actions {
-  margin-bottom: 1rem;
-}
-.form {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  margin-bottom: 1.5rem;
-}
-input {
-  padding: 0.5rem;
-  border-radius: 4px;
-  border: none;
+.comments {
+  margin-top: 10px;
+  padding: 10px;
+  border-left: 3px solid #42b883;
 }
 button {
-  background: #42b883;
-  color: white;
-  padding: 0.5rem;
-  border: none;
-  cursor: pointer;
-  border-radius: 4px;
-}
-button:hover {
-  background: #2a9d6e;
-}
-.item {
-  background: #1e1e1e;
-  padding: 1rem;
-  margin-top: 0.75rem;
-  border-radius: 6px;
-}
-.row {
-  display: flex;
-  gap: 0.5rem;
-  margin-top: 0.75rem;
-}
-.editBox {
-  padding: 1rem;
-  border: 2px solid #42b883;
-  border-radius: 8px;
-  background: #17221f;
+  margin-right: 10px;
 }
 </style>
- 
-
 
