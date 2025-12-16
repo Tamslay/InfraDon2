@@ -5,85 +5,118 @@ import PouchFind from "pouchdb-find"
 
 PouchDB.plugin(PouchFind)
 
-const localDB = ref<any>(null)
-const remoteDB = ref<any>(null)
+const postsDB = ref<any>(null)
+const commentsDB = ref<any>(null)
+const postsRemote = ref<any>(null)
+const commentsRemote = ref<any>(null)
 
 const posts = ref<any[]>([])
-const searchText = ref("")
+const comments = ref<Record<string, any[]>>({})
+
 const newTitle = ref("")
 const newContent = ref("")
-const factoryCount = ref(20)
-
-const newComment = ref("")
-const editingContent = ref("")
+const searchText = ref("")
+const newComment = ref<Record<string, string>>({})
+const editComment = ref<Record<string, string>>({})
+const editingCommentId = ref<string | null>(null)
+const factoryCount = ref<number>(20)
 const online = ref(true)
 
 const initDB = () => {
-  localDB.value = new PouchDB("posts-local")
-  remoteDB.value = new PouchDB("http://admin:matteo@localhost:5984/message")
+  postsDB.value = new PouchDB("posts-local")
+  commentsDB.value = new PouchDB("comments-local")
+  postsRemote.value = new PouchDB("http://admin:matteo@localhost:5984/posts")
+  commentsRemote.value = new PouchDB("http://admin:matteo@localhost:5984/comments")
 }
 
-const createIndex = async () => {
-  await localDB.value.createIndex({ index: { fields: ["createdAt"] } })
-  await localDB.value.createIndex({ index: { fields: ["title"] } })
+const createIndexes = async () => {
+  await postsDB.value.createIndex({ index: { fields: ["createdAt"] } })
+  await postsDB.value.createIndex({ index: { fields: ["title"] } })
+  await commentsDB.value.createIndex({ index: { fields: ["postId"] } })
 }
 
 const loadPosts = async () => {
-  const result = await localDB.value.find({
+  const result = await postsDB.value.find({
     selector: { createdAt: { $gte: null } },
     sort: [{ createdAt: "desc" }]
   })
   posts.value = result.docs
 }
 
+const loadCommentsForPost = async (postId: string) => {
+  const result = await commentsDB.value.find({
+    selector: { postId }
+  })
+  comments.value[postId] = result.docs
+}
+
 const addPost = async () => {
   if (!newTitle.value || !newContent.value) return
-  const now = new Date().toISOString()
-  const doc = {
-    _id: now,
+  await postsDB.value.put({
+    _id: crypto.randomUUID(),
     title: newTitle.value,
     content: newContent.value,
     likes: 0,
-    comments: [],
-    createdAt: now
-  }
-  await localDB.value.put(doc)
+    createdAt: new Date().toISOString()
+  })
   newTitle.value = ""
   newContent.value = ""
-  loadPosts()
-}
-
-const deletePost = async (post: any) => {
-  await localDB.value.remove(post)
-  loadPosts()
+  await loadPosts()
 }
 
 const updatePost = async (post: any) => {
-  const updated = { ...post }
-  await localDB.value.put(updated)
-  loadPosts()
+  await postsDB.value.put({ ...post })
+  await loadPosts()
+}
+
+const deletePost = async (post: any) => {
+  await postsDB.value.remove(post)
+  await loadPosts()
 }
 
 const likePost = async (post: any) => {
-  post.likes++
-  await localDB.value.put(post)
-  loadPosts()
+  await postsDB.value.put({ ...post, likes: post.likes + 1 })
+  await loadPosts()
 }
 
-const addComment = async (post: any) => {
-  if (!newComment.value) return
-  post.comments.push({
-    text: newComment.value,
-    date: new Date().toISOString()
+const addComment = async (postId: string) => {
+  const text = newComment.value[postId]
+  if (!text) return
+  await commentsDB.value.put({
+    _id: crypto.randomUUID(),
+    postId,
+    text,
+    createdAt: new Date().toISOString()
   })
-  await localDB.value.put(post)
-  newComment.value = ""
-  loadPosts()
+  newComment.value[postId] = ""
+  await loadCommentsForPost(postId)
+}
+
+const startEditComment = (comment: any) => {
+  editingCommentId.value = comment._id
+  editComment.value[comment._id] = comment.text
+}
+
+const updateComment = async (comment: any) => {
+  await commentsDB.value.put({
+    ...comment,
+    text: editComment.value[comment._id]
+  })
+  editingCommentId.value = null
+  await loadCommentsForPost(comment.postId)
+}
+
+const deleteComment = async (comment: any) => {
+  await commentsDB.value.remove(comment)
+  await loadCommentsForPost(comment.postId)
 }
 
 const searchPosts = async () => {
-  if (!searchText.value) return loadPosts()
-  const result = await localDB.value.find({
+  if (!searchText.value) {
+    await loadPosts()
+    return
+  }
+  const result = await postsDB.value.find({
     selector: {
       title: { $regex: searchText.value },
       createdAt: { $gte: null }
@@ -96,78 +129,61 @@ const searchPosts = async () => {
 const generateFakePosts = async () => {
   const batch = []
   for (let i = 0; i < factoryCount.value; i++) {
-    const now = new Date().toISOString()
     batch.push({
-      _id: now + "-" + i,
+      _id: crypto.randomUUID(),
       title: "Fake Post " + i,
       content: "Lorem ipsum " + Math.random(),
       likes: Math.floor(Math.random() * 50),
-      comments: [],
-      createdAt: now
+      createdAt: new Date().toISOString()
     })
   }
-  await localDB.value.bulkDocs(batch)
-  loadPosts()
+  await postsDB.value.bulkDocs(batch)
+  await loadPosts()
 }
 
 const startSync = () => {
-  localDB.value.sync(remoteDB.value, {
-    live: true,
-    retry: true
-  })
-    .on("change", loadPosts)
+  postsDB.value.sync(postsRemote.value, { live: true, retry: true })
     .on("paused", () => online.value = false)
     .on("active", () => online.value = true)
+
+  commentsDB.value.sync(commentsRemote.value, { live: true, retry: true })
 }
 
-const listenLocalChanges = () => {
-  localDB.value.changes({
-    since: "now",
-    live: true,
-    include_docs: true
-  }).on("change", loadPosts)
-}
-
-onMounted(() => {
+onMounted(async () => {
   initDB()
-  createIndex()
-  loadPosts()
-  listenLocalChanges()
+  await createIndexes()
+  await loadPosts()
   startSync()
 })
 </script>
 
 <template>
-  <h1>💬 CouchDB + Vue.js + PouchDB</h1>
+  <h1>CouchDB + Vue + PouchDB</h1>
 
   <p :style="{ color: online ? 'green' : 'red' }">
     ● Statut : <strong>{{ online ? "Online" : "Offline" }}</strong>
   </p>
 
   <h2>Ajouter un post</h2>
-  <input v-model="newTitle" placeholder="Titre du post" />
-  <input v-model="newContent" placeholder="Contenu du post" />
+  <input v-model="newTitle" placeholder="Titre" />
+  <input v-model="newContent" placeholder="Contenu" />
   <button @click="addPost">Ajouter</button>
 
   <hr>
 
-  <h2>Rechercher un post</h2>
-  <input v-model="searchText" placeholder="Recherche titre" />
+  <h2>Recherche</h2>
+  <input v-model="searchText" placeholder="Titre" />
   <button @click="searchPosts">Rechercher</button>
 
   <hr>
 
-  <button @click="startSync">Synchroniser vers CouchDB</button>
-
-  <hr>
-
-  <h2>Générer des posts</h2>
-  <input v-model="factoryCount" type="number" />
+  <h2>Factory</h2>
+  <input v-model.number="factoryCount" type="number" />
   <button @click="generateFakePosts">Générer</button>
 
   <hr>
 
-  <h2>Liste des posts</h2>
+  <h2>Posts</h2>
 
   <div v-for="post in posts" :key="post._id" class="post">
     <h3>{{ post.title }}</h3>
@@ -182,13 +198,23 @@ onMounted(() => {
 
     <div class="comments">
       <h4>Commentaires</h4>
+      <button @click="loadCommentsForPost(post._id)">Charger</button>
 
       <ul>
-        <li v-for="c in post.comments" :key="c.date">{{ c.text }}</li>
+        <li v-for="c in comments[post._id]" :key="c._id">
+          <span v-if="editingCommentId !== c._id">{{ c.text }}</span>
+          <input
+            v-else
+            v-model="editComment[c._id]"
+          />
+          <button v-if="editingCommentId !== c._id" @click="startEditComment(c)">Modifier</button>
+          <button v-else @click="updateComment(c)">Valider</button>
+          <button @click="deleteComment(c)">Supprimer</button>
+        </li>
       </ul>
 
-      <input v-model="newComment" placeholder="Nouveau commentaire" />
-      <button @click="addComment(post)">Ajouter commentaire</button>
+      <input v-model="newComment[post._id]" placeholder="Nouveau commentaire" />
+      <button @click="addComment(post._id)">Ajouter</button>
     </div>
   </div>
 </template>
@@ -206,6 +232,6 @@ onMounted(() => {
   border-left: 3px solid #42b883;
 }
 button {
-  margin-right: 10px;
+  margin-right: 5px;
 }
 </style>
