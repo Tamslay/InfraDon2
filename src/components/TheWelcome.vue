@@ -5,6 +5,8 @@ import PouchFind from "pouchdb-find"
 
 PouchDB.plugin(PouchFind)
 
+/*
+  offline-firstes donc les base distantes servent uniquement pour la réplication. */
 const postsDB = ref<any>(null)
 const commentsDB = ref<any>(null)
 const postsRemote = ref<any>(null)
@@ -12,6 +14,7 @@ const commentsRemote = ref<any>(null)
 
 const posts = ref<any[]>([])
 const comments = ref<Record<string, any[]>>({})
+const lastComments = ref<Record<string, any | null>>({})
 
 const newTitle = ref("")
 const newContent = ref("")
@@ -22,6 +25,13 @@ const editingCommentId = ref<string | null>(null)
 const factoryCount = ref<number>(20)
 const online = ref(true)
 
+
+const page = ref(0)
+const PAGE_SIZE = 10
+
+
+const fileInput = ref<Record<string, File | null>>({})
+
 const initDB = () => {
   postsDB.value = new PouchDB("posts-local")
   commentsDB.value = new PouchDB("comments-local")
@@ -29,23 +39,51 @@ const initDB = () => {
   commentsRemote.value = new PouchDB("http://admin:matteo@localhost:5984/comments")
 }
 
+/*
+  indexer pour éviter d'utiliser allDocs(include_docs) et de filtré en js */
 const createIndexes = async () => {
   await postsDB.value.createIndex({ index: { fields: ["createdAt"] } })
   await postsDB.value.createIndex({ index: { fields: ["title"] } })
-  await commentsDB.value.createIndex({ index: { fields: ["postId"] } })
+  await postsDB.value.createIndex({ index: { fields: ["likes"] } })
+  await commentsDB.value.createIndex({ index: { fields: ["postId", "createdAt"] } })
 }
 
 const loadPosts = async () => {
   const result = await postsDB.value.find({
     selector: { createdAt: { $gte: null } },
-    sort: [{ createdAt: "desc" }]
+    sort: [{ createdAt: "desc" }],
+    limit: PAGE_SIZE,
+    skip: page.value * PAGE_SIZE
   })
   posts.value = result.docs
 }
 
+const nextPage = async () => {
+  page.value++
+  await loadPosts()
+}
+
+const prevPage = async () => {
+  if (page.value > 0) {
+    page.value--
+    await loadPosts()
+  }
+}
+
+/* seulement le dernier commentaire */
+const loadLastComment = async (postId: string) => {
+  const result = await commentsDB.value.find({
+    selector: { postId },
+    sort: [{ createdAt: "desc" }],
+    limit: 1
+  })
+  lastComments.value[postId] = result.docs[0] || null
+}
+
 const loadCommentsForPost = async (postId: string) => {
   const result = await commentsDB.value.find({
-    selector: { postId }
+    selector: { postId },
+    sort: [{ createdAt: "asc" }]
   })
   comments.value[postId] = result.docs
 }
@@ -79,6 +117,18 @@ const likePost = async (post: any) => {
   await loadPosts()
 }
 
+const attachFile = async (post: any) => {
+  const file = fileInput.value[post._id]
+  if (!file) return
+  const doc = await postsDB.value.get(post._id)
+  await postsDB.value.putAttachment(doc._id, "media", doc._rev, file, file.type)
+}
+
+const removeFile = async (post: any) => {
+  const doc = await postsDB.value.get(post._id)
+  await postsDB.value.removeAttachment(doc._id, "media", doc._rev)
+}
+
 const addComment = async (postId: string) => {
   const text = newComment.value[postId]
   if (!text) return
@@ -90,6 +140,7 @@ const addComment = async (postId: string) => {
   })
   newComment.value[postId] = ""
   await loadCommentsForPost(postId)
+  await loadLastComment(postId)
 }
 
 const startEditComment = (comment: any) => {
@@ -98,10 +149,7 @@ const startEditComment = (comment: any) => {
 }
 
 const updateComment = async (comment: any) => {
-  await commentsDB.value.put({
-    ...comment,
-    text: editComment.value[comment._id]
-  })
+  await commentsDB.value.put({ ...comment, text: editComment.value[comment._id] })
   editingCommentId.value = null
   await loadCommentsForPost(comment.postId)
 }
@@ -117,28 +165,18 @@ const searchPosts = async () => {
     return
   }
   const result = await postsDB.value.find({
-    selector: {
-      title: { $regex: searchText.value },
-      createdAt: { $gte: null }
-    },
-    sort: [{ createdAt: "desc" }]
+    selector: { title: searchText.value }
   })
   posts.value = result.docs
 }
 
-const generateFakePosts = async () => {
-  const batch = []
-  for (let i = 0; i < factoryCount.value; i++) {
-    batch.push({
-      _id: crypto.randomUUID(),
-      title: "Fake Post " + i,
-      content: "Lorem ipsum " + Math.random(),
-      likes: Math.floor(Math.random() * 50),
-      createdAt: new Date().toISOString()
-    })
-  }
-  await postsDB.value.bulkDocs(batch)
-  await loadPosts()
+const sortByLikes = async () => {
+  const result = await postsDB.value.find({
+    selector: { likes: { $gte: 0 } },
+    sort: [{ likes: "desc" }],
+    limit: 10
+  })
+  posts.value = result.docs
 }
 
 const startSync = () => {
@@ -172,8 +210,19 @@ onMounted(async () => {
   <hr>
 
   <h2>Recherche</h2>
-  <input v-model="searchText" placeholder="Titre" />
+  <input v-model="searchText" placeholder="Titre exact" />
   <button @click="searchPosts">Rechercher</button>
+
+  <hr>
+
+  <h2>Tri</h2>
+  <button @click="sortByLikes">Top 10 les plus likés</button>
+
+  <hr>
+
+  <h2>Pagination</h2>
+  <button @click="prevPage">Précédent</button>
+  <button @click="nextPage">Suivant</button>
 
   <hr>
 
@@ -182,8 +231,6 @@ onMounted(async () => {
   <button @click="generateFakePosts">Générer</button>
 
   <hr>
-
-  <h2>Posts</h2>
 
   <div v-for="post in posts" :key="post._id" class="post">
     <h3>{{ post.title }}</h3>
@@ -196,17 +243,24 @@ onMounted(async () => {
     <p>Likes : {{ post.likes }}</p>
     <button @click="likePost(post)">Like</button>
 
+    <div>
+      <input type="file" @change="e => fileInput[post._id] = e.target.files[0]" />
+      <button @click="attachFile(post)">Ajouter média</button>
+      <button @click="removeFile(post)">Supprimer média</button>
+    </div>
+
+    <p v-if="lastComments[post._id]">
+      Dernier commentaire : {{ lastComments[post._id].text }}
+    </p>
+    <button @click="loadLastComment(post._id)">Charger dernier commentaire</button>
+
     <div class="comments">
-      <h4>Commentaires</h4>
-      <button @click="loadCommentsForPost(post._id)">Charger</button>
+      <button @click="loadCommentsForPost(post._id)">Voir tous les commentaires</button>
 
       <ul>
         <li v-for="c in comments[post._id]" :key="c._id">
           <span v-if="editingCommentId !== c._id">{{ c.text }}</span>
-          <input
-            v-else
-            v-model="editComment[c._id]"
-          />
+          <input v-else v-model="editComment[c._id]" />
           <button v-if="editingCommentId !== c._id" @click="startEditComment(c)">Modifier</button>
           <button v-else @click="updateComment(c)">Valider</button>
           <button @click="deleteComment(c)">Supprimer</button>
@@ -224,14 +278,14 @@ onMounted(async () => {
   border: 1px solid #ccc;
   padding: 15px;
   margin-bottom: 15px;
-  border-radius: 5px;
 }
 .comments {
-  margin-top: 10px;
-  padding: 10px;
   border-left: 3px solid #42b883;
-}
-button {
-  margin-right: 5px;
+  padding-left: 10px;
 }
 </style>
+
+J’ai privilégier comme demandé des échanges efficaces en évitant donc de répliquer inutilement quoi que ce soit, 
+l’utilisation de allDocs(include_docs) et les filtres etc en js. les données sont indexées et chargée que à la 
+demande et synchronisée non-stop pour que ce soit cohérent même en mode hors ligne. les méthodes les plus utiles 
+selon moi sont createIndex(), find(), limit(), skip() et sort().
